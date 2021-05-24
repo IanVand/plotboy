@@ -15,23 +15,21 @@ from psutil._common import bytes2human
 import smtplib
 import argparse
 
-# Global Flags
+# Globals
 DEBUG = False
+k32_tmp_bytes = 322122547200        # 300GiB; 300*1024*1024*1024
+k32_dest_bytes = 108879151104       # Anecdotally biggest k=32 plot is 108879151104 
 
 class winPC(object):
-    def __init__(self, logger, parallelPlots=10):
+    def __init__(self, logger, parallelPlots=10, RAM_MB=30000):
         # Hardcode CPU_core and RAM_MB for your system!
         # TODO: have python figure out the CPU_core and RAM_MB details
         self.chia_path = "C:\\Users\\ssdrive\\AppData\\Local\\chia-blockchain\\app-1.1.5\\resources\\app.asar.unpacked\\daemon\\"
         self.parallelPlots = parallelPlots
         self.logger = logger
-        self.RAM_MB = 38000
-        
-        # Search for Temp and Destination Paths. Requirements:
-        #     Temp has a folder named 'plot'
-        #     Dest has a folder named 'farm'
-        self.tmp_memory = []
-        self.dest_memory = []
+        self.RAM_MB = RAM_MB
+
+        # Clean printout of all devices
         templ = "%-17s %8s %8s %8s %5s%% %9s  %s"
         print(templ % ("Device", "Total", "Used", "Free", "Use ", "Type", "Mount"))
         for memory in psutil.disk_partitions(all=False):
@@ -44,31 +42,55 @@ class winPC(object):
                 int(usage.percent),
                 memory.fstype,
                 memory.mountpoint))
-                
-            # Check for Temp disks
-            if(os.path.isdir(memory.device + "plot")):
-                # TODO: Need mitigation plan if device's memory is less than 300GB
-                self.tmp_memory.append(memoryClass(memory, isPlotter=True, logger=logger))
+        print ""    # Formatting
+
+        # Search for Temp and Destination Paths. Requirements:
+        #     Temp has a folder named 'plot'
+        #     Dest has a folder named 'farm'
+        self.tmp_memory = []
+        self.dest_memory = []
+        for memory in psutil.disk_partitions(all=False):
+            usage = psutil.disk_usage(memory.mountpoint)
             
             # Check for Temp disks
+            if(os.path.isdir(memory.device + "plot")):
+                # Do not use plotting SSD if the memory is less than 300GB (k32_tmp_bytes)
+                if usage.free < k32_tmp_bytes:
+                    self.logger.warning(str(memory.device) + " does not have 300GB of space for plotting! It has " + str(usage.free) + " bytes of free space.")
+                else:
+                    self.tmp_memory.append(memoryClass(memory, isPlotter=True, logger=logger))
+                    # Give a warning if tmp used space is too high (1GiB)
+                    if usage.used > 1*1024*1024*1024:
+                        self.logger.warning(str(memory.device) + " is not empty! It has " + str(usage.used) + " bytes used.")
+
+            # Check for Temp disks
             if(os.path.isdir(memory.device + "farm")):
-                if not re.search('E', memory.device, re.I):     # skip this
-                    self.dest_memory.append(memoryClass(memory, isPlotter=False, logger=logger))
-        
-        # Print tmp and dest locations
-        print "\nSummary:"
+                # if not re.search('E', memory.device, re.I):     # skip this
+                self.dest_memory.append(memoryClass(memory, isPlotter=False, logger=logger))
+
+        # Exit if self.tmp_memory is empty
+        if not self.tmp_memory:
+            raise Exception("No tmp plotting SSDs found!")
+
+        # Exit if self.dest_memory is empty
+        if not self.dest_memory:
+            raise Exception("No plot destinations found!")
+
+        # Print Summary of tmp and dest locations
+        print ""    # Formatting
+        self.logger.info("Summary:")
         tmp_print = "tmp locations: "
         for x in range(0, len(self.tmp_memory)):
             if x != 0:
                 tmp_print += ", "
             tmp_print += str(self.tmp_memory[x].memory.device)
-        print(tmp_print)
+        self.logger.info(tmp_print)
         dest_print = "dest locations: "
         for x in range(0, len(self.dest_memory)):
             if x != 0:
                 dest_print += ", "
             dest_print += str(self.dest_memory[x].memory.device)
-        print(dest_print)
+        self.logger.info(dest_print)
         
         # Calculate best plotting values
         self.calculate_best_plotting()
@@ -79,37 +101,44 @@ class winPC(object):
         self.mem_per_process = 0
         self.stringCmds = []
     
-        # TODO: Clean up plot directory
+        # TODO: Clean up plot directory; Give a warning here
         
         # TODO: Optimize for disk space with k=32 and k=33 plotting
     
-        # 1) Find the best amount of processes to run in parallel
+        # 1) Find the best amount of processes to run in parallel based on tmp space
         total_tmp_mem = 0
         for memory in self.tmp_memory:
             total_tmp_mem += memory.usage.free
-        # print "total_tmp_mem = " + str(total_tmp_mem)
-        process_max_size = 300*1024*2024 * self.parallelPlots       # 300GB tmp space per plot in parallel
+        self.logger.debug("total_tmp_mem = " + str(total_tmp_mem))
+        # if DEBUG:
+            # k32_tmp_bytes = 2000*1024*1024*1024
+        process_max_size = k32_tmp_bytes * self.parallelPlots       # 300GB tmp space per plot in parallel
         while process_max_size > total_tmp_mem:
-            self.total_processes = self.total_processes - 1
-            process_max_size = process_max_size - 300*1024*1024
+            self.total_processes -= 1
+            process_max_size = process_max_size - k32_tmp_bytes
+            self.logger.debug("total_processes reduced to " + str(self.total_processes) + "; new process_max_size = " + str(process_max_size))
             if process_max_size < 0:
                 raise ValueError("Not enough temp space to plot!")
+
+        # 2) Find total plots to fill up destination memory
+        self.total_plots = 0
+        for memory in self.dest_memory:
+            self.total_plots += memory.totalplots
+        self.logger.info("Need " + str(self.total_plots) + " plots to fill up destination disk space")
+        
+        # 3) Check if total processes is greater than destination plots
+        if self.total_processes > self.total_plots:
+            self.total_processes = self.total_plots
+            self.logger.debug("total_processes reduced to " + str(self.total_processes) + " based on total destination plots")
         self.logger.info("Total Concurrent Plot Processes: " + str(self.total_processes))
         
-        # 2) Find the best amount of memory to utilize
+        # TODO: check for concurrent chia plotting processes
+        
+        # 4) Find the best amount of memory to utilize
         self.mem_per_process = int(self.RAM_MB/ self.total_processes)
         if(self.mem_per_process > 4000):        # 3400 is max size noted on chia.net - https://www.chia.net/2021/02/22/plotting-basics.html, but have seen examples of more. Max at 4000?
             self.mem_per_process = 4000
         self.logger.info("mem_per_process = " + str(self.mem_per_process))
-        
-        # 3) Find total plots to fill up destination memory
-        self.total_plots = 0
-        for memory in self.dest_memory:
-            self.total_plots += memory.totalplots
-        # self.total_plots = int(float(total_dest_mem) / 116823110452)       # Each plot is 108.8GB, or 114085068 bytes
-        # print "total_dest_mem = " + str(total_dest_mem) + ", or " + str(float(total_dest_mem) / (1024*1024*1024*1024*1024)) + "TB"
-        # print "Each plot is 108.8GB, or " + str(108.8*1024*1024*1024) + " bytes"
-        self.logger.info("Need " + str(self.total_plots) + " plots to fill up destination disk space")
         
         # Initialize destination plot counts
         destplotcount = []
@@ -160,15 +189,15 @@ class memoryClass(object):
     def calculateTotalPlots(self):
         if self.isPlotter:
             # Need 300GB for plotters
-            self.totalplots = int(float(self.usage.free) / 322122547200)
+            self.totalplots = int(float(self.usage.free) / k32_tmp_bytes)
         else:
-            # Need 108.8GB for destination plot
-            self.totalplots = int(float(self.usage.free) / 116823110452)
+            # Need 108.8GiB for destination plot
+            self.totalplots = int(float(self.usage.free) / k32_dest_bytes)
 
         self.logger.debug(str(self.memory.device) + " has " + str(self.usage.free) + " space for " + str(self.totalplots) + " total plots")
             
     def recalculateUsage(self):
-        self.usage = psutil.disk_usage(memory.mountpoint)
+        self.usage = psutil.disk_usage(self.memory.mountpoint)
         self.calculateTotalPlots()
         
         
@@ -206,9 +235,10 @@ def main(argv):
     # Command line arguments
     parser = argparse.ArgumentParser(description='ERROR: Invalid inputs')
     parser.add_argument('--mNetworkEmail',default=False,type=bool,metavar="mNetworkEmail",help="Use this flag if you want email updates on plots")
-    parser.add_argument('--staggerMin',default=10,type=int,metavar="staggerMin",help="Stagger time between plots in minutes")
-    parser.add_argument('--sleepMin',default=10,type=int,metavar="sleepMin",help="Sleep time when checking plots")
-    parser.add_argument('--parallelPlots',default=8,type=int,metavar="parallelPlots",help="How many total plots run in parallel")
+    parser.add_argument('--staggerMin',default=10,type=float,metavar="staggerMin",help="Stagger time between plots in minutes")
+    parser.add_argument('--sleepMin',default=10,type=float,metavar="sleepMin",help="Sleep time when checking plots")
+    parser.add_argument('--parallelPlots',default=10,type=int,metavar="parallelPlots",help="How many total plots run in parallel")
+    parser.add_argument('--RAM_MB',default=30000,type=int,metavar="RAM_MB",help="Total RAM space in MB")
     parser.add_argument('--email',default="youremail@gmail.com",type=str,metavar="email",help="Stagger time between plots in minutes")
     parser.add_argument('--DEBUG',default=False,type=bool,metavar="DEBUG",help="Use to test in DEBUG mode. DOES NOT generate plots")
     
@@ -220,10 +250,11 @@ def main(argv):
     staggerTimeMin = args.staggerMin
     sleepTimeMin = args.sleepMin
     parallelPlots = args.parallelPlots
+    RAM_MB = args.RAM_MB
     emailAddress = args.email
     DEBUG = args.DEBUG
     
-    # TODO: Use logger for timestamps
+    # Use logger for timestamps
     logger = logging.getLogger(__name__)
     ch = logging.StreamHandler(sys.stdout)
     ch.setLevel(logging.DEBUG)
@@ -239,18 +270,23 @@ def main(argv):
 
     # Determine if Windows / Linux
     if sys.platform.startswith('win'):
-        thisPC = winPC(logger, parallelPlots)
+        thisPC = winPC(logger, parallelPlots, RAM_MB)
     else:
         emailUpdateFlag = False
         raise Exception("Linux plotBoy not supported yet!")
     
-    # TEST
-    # return
+    # TODO: Insert pause for user input here
+    # raw_input works with python2.7 only!!!
+    # TODO: Check for python 2.7 and python3
+    goplot = str(raw_input("Continue with plotting (y/n)? "))
+    if not((goplot is 'y') or (goplot is 'Y')):
+        logger.info("Goodbye!")
+        return
     
     workloads = []
     WorkerID = 1
     PlotCompleted = 1
-    for x in range(0, thisPC.total_processes + 1):
+    for x in range(0, thisPC.total_processes):
         workloads.append(winWorkloadThread(thisPC.stringCmds[WorkerID-1], WorkerID, logger))
         WorkerID += 1
         
@@ -260,7 +296,6 @@ def main(argv):
         logger.info("Plot " + str(plotID) + " started")
         workload.start()
         plotID += 1
-        # TODO: Stagger by plotting stage
         time.sleep(staggerTimeMin * 60)       # Stagger time in minutes
         
     # Monitor Workloads
@@ -276,7 +311,8 @@ def main(argv):
                     SendEmail(receiver=emailAddress, subject=emailMsg, message=emailMsg, senderName=emailAddress)
                 logger.info("Plot " + str(workloads[x].workerID) + " has finished")
                 workloads.remove(workloads[x])
-                if WorkerID < thisPC.total_plots:
+                # TODO: recalculate plots
+                if WorkerID <= thisPC.total_plots:
                     thisWorkload = winWorkloadThread(thisPC.stringCmds[WorkerID-1], WorkerID, logger)
                     logger.info("Plot " + str(plotID) + " started")
                     thisWorkload.start()
@@ -285,12 +321,10 @@ def main(argv):
                     plotID += 1
                 PlotCompleted += 1
                 break
-            # else:
-                # logger.info("workloads[" + str(x) + "] still running")
                 
-    
-
-    
-        
+    if emailUpdateFlag:
+        emailMsg = "All plotting completed on " + str(socket.gethostname()) + "!!"
+        SendEmail(receiver=emailAddress, subject=emailMsg, message=emailMsg, senderName=emailAddress)
+                
 if __name__ == "__main__":
     main(sys.argv[1:])
