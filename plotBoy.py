@@ -21,10 +21,12 @@ k32_tmp_bytes = 322122547200        # 300GiB; 300*1024*1024*1024
 k32_dest_bytes = 108879151104       # Anecdotally biggest k=32 plot is 108879151104 
 
 class winPC(object):
-    def __init__(self, logger, parallelPlots=10, RAM_MB=30000):
+    def __init__(self, logger, PCA, parallelPlots=10, RAM_MB=30000):
         # Hardcode CPU_core and RAM_MB for your system!
         # TODO: have python figure out the CPU_core and RAM_MB details
-        self.chia_path = "C:\\Users\\ssdrive\\AppData\\Local\\chia-blockchain\\app-1.1.5\\resources\\app.asar.unpacked\\daemon\\"
+        # TODO: "app-1.2.0" changes with chia versions; need to make more flexible
+        self.chia_path = "C:\\Users\\ssdrive\\AppData\\Local\\chia-blockchain\\app-1.2.0\\resources\\app.asar.unpacked\\daemon\\"
+        self.PCA = PCA
         self.parallelPlots = parallelPlots
         self.logger = logger
         self.RAM_MB = RAM_MB
@@ -163,7 +165,9 @@ class winPC(object):
         while totalpltcount < self.total_plots:
             for x in range(0, len(self.dest_memory)):
                 if(destplotcount[x] > 0):
-                    cmd = self.chia_path + "chia.exe plots create -k 32 -b " + str(self.mem_per_process) + " -u 128 -r 2 -t " + str(self.tmp_memory[tmpPlotList[totalpltcount]].memory.device + "plot") + " -d " + str(self.dest_memory[x].memory.device + "farm") + " -n 1"
+                    cmd = self.chia_path + "chia.exe plots create -k 32 -b " + str(self.mem_per_process) + " -u 128 -r 2 " +\
+                          "-t " + str(self.tmp_memory[tmpPlotList[totalpltcount]].memory.device + "plot") + " -c " + self.PCA + " -d " +\
+                          str(self.dest_memory[x].memory.device + "farm") + " -n 1"
                     if DEBUG:
                         cmd = "echo '" + cmd + "'"
                     self.stringCmds.append(cmd)
@@ -234,9 +238,10 @@ def main(argv):
 
     # Command line arguments
     parser = argparse.ArgumentParser(description='ERROR: Invalid inputs')
+    parser.add_argument('PCA',type=str,metavar="PCA",help="Pool Contact Address")
     parser.add_argument('--mNetworkEmail',default=False,type=bool,metavar="mNetworkEmail",help="Use this flag if you want email updates on plots")
-    parser.add_argument('--staggerMin',default=10,type=float,metavar="staggerMin",help="Stagger time between plots in minutes")
-    parser.add_argument('--sleepMin',default=10,type=float,metavar="sleepMin",help="Sleep time when checking plots")
+    parser.add_argument('--staggerMin',default=30,type=float,metavar="staggerMin",help="Stagger time between plots in minutes")
+    parser.add_argument('--sleepMin',default=15,type=float,metavar="sleepMin",help="Sleep time when checking plots")
     parser.add_argument('--parallelPlots',default=10,type=int,metavar="parallelPlots",help="How many total plots run in parallel")
     parser.add_argument('--RAM_MB',default=30000,type=int,metavar="RAM_MB",help="Total RAM space in MB")
     parser.add_argument('--email',default="youremail@gmail.com",type=str,metavar="email",help="Stagger time between plots in minutes")
@@ -246,6 +251,7 @@ def main(argv):
     args = parser.parse_args()
 
     # Get arguments
+    PoolContactAddress = args.PCA
     emailUpdateFlag = args.mNetworkEmail
     staggerTimeMin = args.staggerMin
     sleepTimeMin = args.sleepMin
@@ -253,6 +259,8 @@ def main(argv):
     RAM_MB = args.RAM_MB
     emailAddress = args.email
     DEBUG = args.DEBUG
+    
+    # PoolContactAddress = 'xch1z8mr0ruw87xhuur0qcs9zxzmh8pq74fp7y72l5vhfdq9ghu95ntq4ssx90'
     
     # Use logger for timestamps
     logger = logging.getLogger(__name__)
@@ -270,7 +278,7 @@ def main(argv):
 
     # Determine if Windows / Linux
     if sys.platform.startswith('win'):
-        thisPC = winPC(logger, parallelPlots, RAM_MB)
+        thisPC = winPC(logger, PoolContactAddress, parallelPlots, RAM_MB)
     else:
         emailUpdateFlag = False
         raise Exception("Linux plotBoy not supported yet!")
